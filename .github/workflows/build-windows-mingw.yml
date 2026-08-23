@@ -1,0 +1,64 @@
+name: "Build for Windows (MinGW)"
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      dogfood:
+        description: 'Use dogfood Nix build'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all # zizmor: ignore[excessive-permissions]
+
+jobs:
+  build-windows-mingw:
+    name: build and test for Windows (x86_64-w64-mingw32)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/install-nix-action
+        with:
+          dogfood: ${{ github.event_name == 'workflow_dispatch' && inputs.dogfood || github.event_name != 'workflow_dispatch' }}
+          extra_nix_config: experimental-features = nix-command flakes
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Ubuntu 23.10+ restricts unprivileged user namespaces which can break the Nix sandbox
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Build Nix for Windows (cross-compile via MinGW)
+        run: |
+          nix build \
+            --file ci/gha/tests/windows.nix \
+            --json \
+            -L \
+            2>&1 | tee build-windows.log
+
+      - name: Run Windows unit tests (under Wine)
+        run: |
+          nix build \
+            --file ci/gha/tests/windows.nix \
+            unitTests.nix-util-tests \
+            -L
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-mingw-build-log
+          path: build-windows.log
